@@ -1,2 +1,761 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+import plotly.io as pio
+import plotly.express as px
+from statsmodels.stats.outliers_influence import variance_inflation_factor
+import statsmodels.api as sm
+import re  # Avem nevoie de asta pentru a gasi numerele
+import pandas as pd
+import numpy as np
+import re
+
+from sklearn.model_selection import train_test_split
+from sklearn.linear_model import LinearRegression
+from sklearn.metrics import mean_absolute_error, r2_score
+
+import seaborn as sns
+import seaborn as sns
+import matplotlib.pyplot as plt
+
+
+# citirea datelor
+data = pd.read_csv('laptop_price.csv', encoding="cp1252")
+
+# ========================#
+# CURATAREA SETULUI DE DATE
+# ========================#
+
+# omodificare tip datelor din coloanele Ram si Weight (object -> float)
+data["Ram"] = (data["Ram"].str.replace("GB", "", regex=False).astype(float))
+
+data["Weight"] = (data["Weight"].str.replace(
+    "kg", "", regex=False).astype(float))
+
+# despartirea coloanei "ScreenResolution" in rezolutie si tip ecran
+
+data["Resolution"] = data["ScreenResolution"].str.extract(r'(\d+x\d+)')
+data["ResolutionWidth"] = data["Resolution"].str.split("x").str[0].astype(int)
+data["ResolutionHeight"] = data["Resolution"].str.split("x").str[1].astype(int)
+
+# tipul de display
+data["ScreenType"] = data["ScreenResolution"].str.replace(
+    r'\d+x\d+', '', regex=True).str.strip()
+
+# impartire pe IPS/Non-IPS
+data["IPS"] = data["ScreenType"].str.contains(
+    "IPS", case=False, na=False).map({
+        True: "Da",
+        False: "Nu"
+    })
+data["IPS_bin"] = (data["IPS"] == "Da").astype(int)
+# impartire pe Retina/Full HD/Quad HD/4K Ultra HD/Necunoscut
+
+
+def extract_resolution(screen_resolution: str) -> str:
+    if pd.isna(screen_resolution):
+        # valorile nule sunt tratate ca "fara specificatii" acest lucru putand fi luat in calcul
+        return "Fara specificatii"
+
+    s = str(screen_resolution).lower()
+
+    # Ordinea contează (4k înainte de "hd", etc.)
+    if "retina" in s:
+        return "Retina"
+
+    if "4k" in s or "ultra hd" in s:
+        return "4K Ultra HD"
+
+    if "quad hd+" in s or "qhd+" in s:
+        return "Quad HD+"
+
+    # Full HD poate apărea ca "Full HD" sau "FHD"
+    if "full hd" in s or "fhd" in s or "FHD" in s:
+        return "Full HD"
+
+    return "Fara Specificatii"
+
+
+data["ResolutionCategory"] = data["ScreenResolution"].apply(extract_resolution)
+
+# impartire pe Touchscreen/Non-Touchscreen
+data["Touchscreen"] = data["ScreenType"].str.contains("touch", case=False, na=False).map({
+    True: "Da",
+    False: "Nu"
+})
+# copie binară 1/0 langa Touchscreen
+data["Touchscreen_bin"] = (data["ScreenType"] == "Da").astype(int)
+
+# despartirea coloanei "Cpu" in frecventa si tip CPU
+
+data["CpuFrequencyGHz"] = data["Cpu"].str.extract(
+    r'([\d\.]+)GHz').astype(float)
+
+data["CpuModel"] = data["Cpu"].str.replace(
+    r'([\d\.]+)GHz', '', regex=True).str.strip()
+
+# despartirea coloanei "Memory" in SSD, HDD si Flash  !!!!!!!!! nu ia toate HDD caz la 1077 sau sunt hibrid
+
+# =========================================================
+#  FUNCTIA PENTRU SORTAREA MEMORIEI
+# =========================================================
+
+
+def proceseaza_memorie(text_memorie):
+    # Initializam totul cu 0
+    ssd = 0.0
+    hdd = 0.0
+    flash = 0.0
+    hybrid = 0.0
+
+    # Daca e gol, returnam zerouri
+    if pd.isna(text_memorie):
+        return pd.Series([0.0, 0.0, 0.0, 0.0])
+
+    # 1. Spargem textul in bucati daca are "+" (ex: "128GB SSD + 1TB HDD")
+    bucati = str(text_memorie).split('+')
+
+    for bucata in bucati:
+        bucata = bucata.strip()  # Stergem spatiile inutile
+        valoare = 0.0
+
+        # 2. Cautam numarul (fie intreg 1, fie cu punct 1.0)
+        # Regex-ul (\d+(\.\d+)?) inseamna: cifre, optional urmate de punct si alte cifre
+        match = re.search(r'(\d+(\.\d+)?)', bucata)
+
+        if match:
+            valoare = float(match.group(1))  # Luam numarul gasit
+
+            # 3. VERIFICAM DACA E TB SAU GB
+            if 'TB' in bucata:
+                valoare = valoare * 1024
+            # Daca e GB, ramane asa cum e
+
+            # 4. PUNEM VALOAREA IN SERTARUL CORECT
+            if 'SSD' in bucata:
+                ssd += valoare
+            elif 'HDD' in bucata:
+                hdd += valoare
+            elif 'Hybrid' in bucata:
+                hybrid += valoare
+            elif 'Flash' in bucata:
+                flash += valoare
+
+    # Returnam cele 4 valori curate
+    return pd.Series([ssd, hdd, flash, hybrid])
+
+#  APLICAM FUNCTIA PE TOT TABELUL
+
+
+print("Se curăță memoria... Durează o secundă...")
+
+# Aici aplicam functia pe fiecare rand si cream direct cele 4 coloane
+cols = data['Memory'].apply(proceseaza_memorie)
+cols.columns = ['SSD_GB', 'HDD_GB', 'Flash_GB', 'Hybrid_GB']
+
+# Lipim coloanele noi de tabelul nostru
+data = pd.concat([data, cols], axis=1)
+
+# Calculam totalul
+data["TotalStorage_GB"] = data["SSD_GB"] + \
+    data["HDD_GB"] + data["Flash_GB"] + data["Hybrid_GB"]
+
+
+# ==============================#
+# FINAL CURATAREA SETULUI DE DATE
+# ==============================#
+
+# afișarea primelor 5 rânduri din setul de date
+print(data.head())
+
+# afișarea informațiilor despre setul de date
+print(data.info())
+
+# numarul inregistrarilor
+n_rows = data.shape
+print('Numărul de înregistrări:', n_rows)
+
+# verificarea valorilor lipsă
+print('Valorile lipsă în fiecare coloană:')
+print(data.isnull().sum())
+
+# stergerea coloanelor Memory, ScreenType si Cpu - nu mai sunt necesare au fost despartite
+data = data.drop(columns=["Memory", "Cpu", "ScreenType", "ScreenResolution"])
+# punem datele modificate intr un nou fisier csv
+data.to_csv('laptop_price_cleaned.csv', index=False)
+print("Datele au fost salvate in fisierul: `laptop_price_cleaned.csv`")
+
+# --------------------------------------
+# ------ANALIZA DATELOR ----------
+# ------------------------------------
+
+# 1. PREGĂTIREA VARIABILELOR CATEGORIALE
+# Funcție pentru a simplifica modelele de CPU în categorii mai scurtate pentru regresie
+
+
+def simplifica_cpu(text):
+    text = str(text).lower()
+    if 'i7' in text:
+        return 'Intel_i7'
+    elif 'i5' in text:
+        return 'Intel_i5'
+    elif 'i3' in text:
+        return 'Intel_i3'
+    elif 'amd' in text:
+        return 'AMD'
+    elif 'celeron' in text or 'pentium' in text:
+        return 'Intel_Entry_Level'
+    else:
+        return 'Altele'
+
+
+# Aplicăm funcția pentru a crea o coloană nouă simplificată
+data['Cpu_Category'] = data['CpuModel'].apply(simplifica_cpu)
+
+# Funcție pentru a simplifica modelele de GPU în categorii mai scurtate pentru a putea fi folosite în regresie
+
+
+def simplifica_gpu(text):
+    text = str(text).lower()
+    if 'nvidia' in text:
+        return 'Nvidia'
+    elif 'amd' in text:
+        return 'AMD'
+    elif 'intel' in text:
+        return 'Intel'
+    else:
+        return 'Altele'
+
+
+# Cream coloana noua simplificata
+data['Gpu_Brand'] = data['Gpu'].apply(simplifica_gpu)
+
+# Identificăm coloanele care sunt text (Categorice) și au impact asupra prețului
+categorice_de_transformat = ['Company', 'TypeName', 'OpSys',
+                             'ResolutionCategory', 'Cpu_Category', 'Gpu_Brand']
+
+# 2. CREAREA VARIABILELOR DUMMY
+# Folosim drop_first=True pentru a evita "Capcana Variabilei Dummy" (Multicoliniaritatea)
+data_dummy = pd.get_dummies(
+    data, columns=categorice_de_transformat, drop_first=True)
+
+# 3. GESTIONAREA VARIABILELOR BINARE (DA/NU)
+#  pentru Touchscreen folosim fel ca la IPS da/nu
+if 'Touchscreen' in data_dummy.columns:
+    data_dummy['Touchscreen_bin'] = (
+        data_dummy['Touchscreen'] == 'Da').astype(int)
+
+# 4. DEFINIREA VARIABILELOR PENTRU MODEL (X și y)
+# Variabila dependentă (ce vrem să prezicem)
+y = data_dummy['Price_euros']
+
+# Variabilele independente (predictorii)
+# Eliminăm coloanele de tip text rămase, ID-urile și variabila țintă
+X = data_dummy.drop(columns=[
+    'Price_euros',
+    'ResolutionWidth',
+    'ResolutionHeight',
+    'IPS',
+    'Product',
+    'Touchscreen',
+    'TotalStorage_GB',
+    'laptop_ID',
+], errors='ignore')
+
+# Ne asigurăm că X conține doar tipuri de date numerice (int, float, bool)
+X = X.select_dtypes(include=[np.number, bool]).astype(float)
+
+# 5. RULAREA MODELULUI sm.OLS (ANALIZA STATISTICĂ)
+print("=== ANALIZA STATISTICĂ (INFERENȚĂ OLS) ===")
+
+# Adăugăm constanta (Intercept) - obligatoriu în statsmodels
+X_stat = sm.add_constant(X)
+
+# Creare și antrenare model
+model_stat = sm.OLS(y, X_stat).fit()
+
+# Afișare sumar detaliat
+print(model_stat.summary())
+
+# ===================#
+# MULTICOLINIARITATE
+# ===================#
+
+print("\n=== ANALIZA MULTICOLINIARITĂȚII (VIF) ===")
+
+# 1. Alegem doar variabilele numerice care POT fi duplicate
+# Nu punem prețul aici, că prețul e efectul, nu cauza!
+variabile_vif = data[[
+    'Ram',
+    'Inches',
+    'Weight',
+    'ResolutionWidth',
+    'ResolutionHeight',
+    'CpuFrequencyGHz',
+    'SSD_GB',
+    'HDD_GB'
+]].dropna()  # Ne asigurăm că nu avem valori lipsă
+
+# 2. Calculăm VIF pentru fiecare
+vif_data = pd.DataFrame()
+vif_data["Variabila"] = variabile_vif.columns
+vif_data["VIF"] = [variance_inflation_factor(variabile_vif.values, i)
+                   for i in range(len(variabile_vif.columns))]
+
+# 3. Sortăm să vedem problemele primele
+print(vif_data.sort_values(by="VIF", ascending=False))
+
+# ===================#
+#   Rescriem VIF
+# ===================#
+# Eliminăm coloanele cu VIF mare (peste 5)
+print(' ')
+variabile_vif = data[[
+    'Ram',
+    'SSD_GB',
+    'HDD_GB'
+]].dropna()  # Ne asigurăm că nu avem valori lipsă
+
+# 2. Calculăm VIF pentru fiecare
+vif_data = pd.DataFrame()
+vif_data["Variabila"] = variabile_vif.columns
+vif_data["VIF"] = [variance_inflation_factor(variabile_vif.values, i)
+                   for i in range(len(variabile_vif.columns))]
+
+# 3. Sortăm să vedem problemele primele
+print(vif_data.sort_values(by="VIF", ascending=False))
+
+
+# ==============================
+# STATISTICI DESCRIPTIVE PENTRU y
+# Variabila dependenta: Price_euros
+# ==============================
+
+# Selectam variabila dependenta
+y = data_dummy['Price_euros']
+
+# Calculam statisticile
+statistici_y = pd.Series({
+    'Media': y.mean(),
+    'Mediana': y.median(),
+    'Q1 (25%)': y.quantile(0.25),
+    'Q3 (75%)': y.quantile(0.75),
+    'Deviația standard': y.std()
+})
+
+print("\n=== STATISTICI DESCRIPTIVE PENTRU PREȚUL LAPTOPURILOR (y) ===")
+print(statistici_y)
+
+# ====================#
+#   Graficare date
+# ====================#
+
+# Scater Plot penrtu distributia preturilor laptopurilor  in functie de Ram
+plt.figure(figsize=(8, 5))
+sns.scatterplot(x=data['Price_euros'], y=data['Ram'], color='orange')
+plt.title("Legătura dintre Preț și RAM")
+plt.xlabel("Preț (Euro)")
+plt.ylabel("Memorie RAM (GB)")
+plt.show()
+# Interpretare:
+# valorile se invart in jurul preturilor mai mici pana in 3000euro
+# se observa o usoara crestere a pretului odata cu cresterea memoriei ram
+
+# BoxPlot pentru preturi in functie de Ram
+plt.figure(figsize=(15, 5))
+
+# --- Preț vs Tip Laptop ---
+sns.boxplot(x='Company', y='Price_euros', data=data, palette='Set3')
+plt.title('Legătura dintre Comanie și Preț')
+plt.xticks(rotation=25)
+plt.show()
+# Interpretare:
+# se observa diferenele de pret intre compani, dar si fpatul ca exista firme ce nu au date relevante pentru studiu(nu au destule observatii ex Vero,Huaweii,Mediacom)
+# cu toate aceste cele mai relevante date sunt cele de la Razer - avand laptopuri ce se incadreaza in mai mult ecategori de pret
+# Aplle, Asus, Dell, Lenovo avand destule operatii si niste medii de pret bune pentru a putea face predictii relevante
+
+# Analiza asupra Asus,Apple,Dell,Lenovo
+data_relevanta = data[data['Company'].isin(
+    ['Asus', 'Apple', 'Dell', 'Lenovo'])]
+plt.figure(figsize=(10, 6))
+sns.boxplot(x='Company', y='Price_euros', data=data_relevanta, palette='Set2')
+plt.title('Comparatie Preț: Asus VS Apple VS Dell VS Lenovo')
+plt.show()
+# Interpretare:
+# 1. Apple are cele mai mari preturi, urmat de Dell, Lenovo si Asus
+# 2. Asus are cea mai mare variabilitate a preturilor, urmat de Lenovo si Dell
+# 3. Toate companiile au outlieri semnificativi, mai ales Asus si Dell
+# 4. Mediana preturilor pentru Apple este semnificativ mai mare decat cea a celorlalte companii
+# 5. Dell si Lenovo au medii de pret similare, dar Dell are o variabilitate mai mare a preturilor
+# 6. Asus pare sa ofere o gama larga de laptopuri, de la cele mai ieftine la cele mai scumpe
+
+# Cum afecteaza Ram pretul
+plt.figure(figsize=(12, 6))
+sns.lineplot(x='Ram', y='Price_euros', data=data, marker='x',
+             linewidth=2.5, markeredgecolor='black', markersize=10, color='green')
+plt.title('Cum afectează RAM-ul prețul (Trendul Mediu)')
+plt.xlabel('Memorie RAM (GB)')
+plt.ylabel('Preț Mediu (Euro)')
+# Adăugăm un grilaj (pătrățele) pe fundal ca să citești mai ușor valorile
+plt.grid(True)
+plt.show()
+# Interpretare:
+# 1. Există o tendință clară de creștere a prețului mediu odată cu creșterea memoriei RAM
+# 2. Creșterea prețului nu este liniară - există salturi semnificative la anumite praguri de RAM (de ex. 8GB - 16GB)
+# 3. Laptopurile cu 4GB RAM au un preț mediu semnificativ mai mic comparativ cu cele cu 8GB RAM
+# 4. După 16GB RAM, creșterea prețului devine mai graduală, sugerând că ;i alte caracteristici devin mai importante pentru preț
+# 5. Cele mai multe leptopuri se gasesc in intervalele 8GB-12GB respectiv 16GB-32GB RAM aici fiind cea mai relevanta crestere a pretului
+
+# prertul mediu al leptopturilor cu storage SSD vs HDD vs flash vs combinat
+# ... (tot codul tău de dinainte cu importuri, curățare, etc.) ...
+
+# Partea cu analiza statistică pe care o aveai deja
+# funcție care etichetează fiecare tip de memorie
+
+
+def eticheta_stocare(row):
+    types = []
+    if row['SSD_GB'] > 0:
+        types.append('SSD')
+    if row['HDD_GB'] > 0:
+        types.append('HDD')
+    if row['Flash_GB'] > 0:
+        types.append('Flash')
+    if row['Hybrid_GB'] > 0:
+        types.append('Hybrid')
+
+    if not types:
+        return 'Necunoscut'
+
+    return ' + '.join(types)
+
+
+# 2. Aplicăm funcția
+data['Tip_Stocare_Real'] = data.apply(eticheta_stocare, axis=1)
+
+# 3. Calculăm mediile
+media_preturi = data.groupby('Tip_Stocare_Real')[
+    'Price_euros'].mean().sort_values()
+
+# 4. Facem graficul
+plt.figure(figsize=(12, 6))
+sns.barplot(x=media_preturi.index, y=media_preturi.values, palette='viridis')
+
+plt.title(
+    'Prețul Mediu: Combinații de Stocare (SSD vs HDD vs Flaash vs Hibryd vs Mix)')
+plt.xlabel('Configurație Stocare')
+plt.ylabel('Preț Mediu (Euro)')
+plt.grid(axis='y', linestyle='--', alpha=0.7)
+plt.xticks(rotation=25)
+plt.tight_layout()
+plt.show()
+# Interpretare:
+# 1. Leptopurile ce au un singur tip de memorie de tip SSD tind sa fie mai scumpe decat cele cu HDD sau Flash
+# 2. Leoptopurile cu configuratie Hybid au un pret mediu cuprins intre cele al laptopurilor cu SSD si HDD
+# 3. Configuratiile mixte (ex: SSD + HDD) tind sa aiba preturi medii mai mari decat cele cu un singur tip de stocare
+# 4. Laptopurile fara specificatii clare de stocare au cel mai mic pret mediu, sugerand ca acestea sunt modele mai vechi sau de buget redus
+
+
+# ========================================================================#
+# Prețul Mediu în funtie de tipul de Laptop - Defalcat pe Branduri (Top 6)
+# ========================================================================#
+abrevieri = {
+    'Notebook': 'NB',
+    'Ultrabook': 'Ultra',
+    'Gaming': 'Game',
+    'Workstation': 'Work',
+    '2 in 1 Convertible': '2in1',
+    'Netbook': 'Net'
+}
+data['TypeName'] = data['TypeName'].str.strip()
+data['Tip_Scurt'] = data['TypeName'].map(abrevieri)
+# Selectam top 9 branduri cu cele mai multe inregistrari
+top_brands = data['Company'].value_counts().head(9).index
+data_top = data[data['Company'].isin(top_brands)]
+# Creaza graficul
+g = sns.catplot(
+    data=data_top,
+    x='Tip_Scurt',   # Folosim numele scurte pe axa X
+    y='Price_euros',
+    col='Company',
+    kind='bar',
+
+    col_wrap=3,      # 3 pe rând
+    palette='viridis',
+    hue='Tip_Scurt',  # Păstrăm culorile frumoase
+    legend=False,    # OPRIM LEGENDA (că scrie sub bare)
+
+    sharex=False,    # <--- ASTA E IMPORTANTA: Afișează scrisul sub TOATE graficele
+    height=3.5,
+    aspect=1.2,
+    errorbar=None
+)
+g.set_axis_labels("", "Preț (Euro)")  # Scoatem eticheta axei X că e redundantă
+g.fig.subplots_adjust(top=0.9)
+g.fig.suptitle('Prețul Mediu pe Branduri (NB=Notebook, Ultra=Ultrabook, etc.)')
+
+plt.show()
+
+# PREZENTARE DETALIATĂ PENTRU O SINGURĂ COMPANIE (HP)
+plt.figure(figsize=(10, 6))
+sns.barplot(
+    x='TypeName',
+    y='Price_euros',
+    data=data[data['Company'] == 'HP'],  # <-- AICI SCHIMBI NUMELE COMPANIEI
+    palette='viridis'
+)
+plt.title('Prețurile HP în funcție de tipul modelului')
+plt.show()
+# Interpretare:
+# 1. in exeplul pentru Hp se obersava cum Notebook-urile media preturilor mai mica, dar si o variabilitate mai mica a preturilor
+# 2. Workstation-urile sunt cele mai scumpe, urmate de Gaming si Ultrabook-uri
+
+# ====================#
+# HARTA DE CORRELAȚIE
+# ====================#
+
+cols_numerice = ['Ram', 'Inches', 'Weight', 'Price_euros',
+                 'TotalStorage_GB', 'ResolutionWidth', 'ResolutionHeight', 'CpuFrequencyGHz',]
+
+plt.figure(figsize=(10, 8))
+sns.heatmap(data[cols_numerice].corr(), annot=True, cmap='coolwarm', fmt=".2f")
+plt.title('Harta Corelațiilor (Ce contează la preț?)')
+plt.xticks(rotation=45)
+plt.yticks(rotation=45)
+plt.show()
+# Interpretare:
+# Se obersav o legatur astransa intre pert si ram, dar si sperficifactiile rezolutiei si dimensiunii ecranului
+# De asemenea se observa o corelatie moderata intre pret si greutate, ceea ce sugereaza ca laptopurile mai usoare tind sa fie mai scumpe
+
+
+# ====================#
+# MODELUL DE REGRESIE LINIARĂ
+# ====================#
+print("\n=== START MODELARE ===")
+
+# 1. ÎMPĂRȚIREA DATELOR (Train vs Test)
+# X = datele tehnice (fără preț), y = prețul
+# test_size=0.2 înseamnă că păstrăm 20% pentru test
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=42)
+
+print(
+    f"Am împărțit datele: {len(X_train)} laptopuri pentru antrenare, {len(X_test)} pentru test.")
+
+# 2. INIȚIALIZARE ȘI ANTRENARE
+model = LinearRegression()
+model.fit(X_train, y_train)  # Aici are loc "învățarea"
+
+# 3. PREDICȚIA
+# Îi dăm specificațiile din test și îi cerem prețul
+# Verificăm cât de bine a învățat pe datele cunoscute
+y_pred_train = model.predict(X_train)
+y_pred_test = model.predict(X_test)   # Marea încercare pe date necunoscute
+
+# 4. EVALUAREA (Cât de bun e modelul?)
+
+# R2 Score (Acuratețea - cât % din variația prețului explicăm)
+r2_train = r2_score(y_train, y_pred_train)
+r2_test = r2_score(y_test, y_pred_test)
+
+# MAE (Eroarea medie în Euro)
+mae = mean_absolute_error(y_test, y_pred_test)
+
+print("\n--- REZULTATELE EXAMENULUI ---")
+print(f"-> Acuratețe pe Antrenament (Train R2): {r2_train:.2f}")
+print(f"-> Acuratețe pe Testare (Test R2):      {r2_test:.2f}")
+print(f"-> Eroarea Medie (MAE):                 {mae:.2f} Euro")
+
+# Interpretare rapidă pentru tine
+print("-" * 30)
+if r2_test > 0.75:
+    print("CONCLUZIE: Modelul este FOARTE BUN! (Peste 75%)")
+elif r2_test > 0.60:
+    print("CONCLUZIE: Modelul este DECENT. Mai e loc de îmbunătățiri.")
+else:
+    print("CONCLUZIE: Modelul e slăbuț. Datele sunt prea haotice.")
+print("-" * 30)
+
+
+# =========================================================
+#  VIZUALIZARE: REALITATE vs PREDICȚIE
+# =========================================================
+
+plt.figure(figsize=(10, 6))
+
+# Punctele albastre = Predicțiile noastre
+sns.scatterplot(x=y_test, y=y_pred_test, alpha=0.6, color='blue')
+
+# Linia roșie = Perfecțiunea (unde Real = Prezis)
+# Desenăm o linie diagonală
+min_val = min(y_test.min(), y_pred_test.min())
+max_val = max(y_test.max(), y_pred_test.max())
+plt.plot([min_val, max_val], [min_val, max_val],
+         color='red', lw=2, linestyle='--')
+
+plt.xlabel('Preț REAL (Euro)')
+plt.ylabel('Preț PREZIS (Euro)')
+plt.title(f'Adevăr vs Predicție (R2: {r2_test:.2f})')
+plt.show()
+
+# =========================================================
+#          TOP FACTORI CARE CRESC PREȚUL
+# =========================================================
+# Vedem coeficienții (Cât adaugă fiecare specificație la preț)
+coefs = pd.DataFrame({'Feature': X.columns, 'Impact_Euro': model.coef_})
+coefs = coefs.sort_values(by='Impact_Euro', ascending=False)
+
+print("\n--- TOP 5 CARACTERISTICI CARE SCUMPESC LAPTOPUL ---")
+print(coefs.head(5))
+
+print("\n--- TOP 5 CARACTERISTICI CARE IEFTINESC LAPTOPUL ---")
+print(coefs.tail(5))
+
+# =========================================================
+# 1. ANALIZA REZIDUURILOR (Validarea ipotezelor regresiei)
+# =========================================================
+# Reziduurile sunt diferențele dintre prețul real și cel prezis
+reziduuri = y_test - y_pred_test
+
+plt.figure(figsize=(10, 5))
+sns.histplot(reziduuri, kde=True, color='purple')
+plt.title('Distribuția Reziduurilor (Erorilor)')
+plt.xlabel('Eroare (Euro)')
+plt.ylabel('Frecvență')
+plt.axvline(x=0, color='red', linestyle='--')
+plt.show()
+
+# Interpretare: Dacă distribuția e normală (clopot) și centrată pe 0,
+# modelul nu este părtinitor (bias).
+
+# =========================================================
+# 2. IDENTIFICAREA OUTLIERILOR (Distanța Cook)
+# =========================================================
+# Folosim modelul de la statsmodels (model_stat) creat anterior
+influence = model_stat.get_influence()
+cooks_d = influence.cooks_distance[0]
+
+plt.figure(figsize=(10, 5))
+plt.stem(np.arange(len(cooks_d)), cooks_d, markerfmt=",")
+plt.title('Distanța Cook pentru identificarea punctelor influente (Outlieri)')
+plt.xlabel('Index Observație')
+plt.ylabel('Distanța Cook')
+plt.show()
+
+# Interpretare: Punctele cu valori foarte mari sunt "outlieri" care
+# trag modelul după ele și pot strica precizia generală.
+
+# =========================================================
+# 3. FUNCTIE DE PREDICTIE PENTRU UN LAPTOP NOU
+# =========================================================
+
+
+def prezice_pret_laptop(brand, tip, ram, ssd, cpu_brand, gpu_brand):
+    """
+    Functie simplificata pentru a estima prețul unui laptop pe baza modelului.
+    """
+    # toate coloanele de antrenare setate 0, nou rand
+    input_data = pd.DataFrame(0, index=[0], columns=X.columns)
+
+    # set valori numerice
+    if 'Ram' in input_data.columns:
+        input_data['Ram'] = ram
+    if 'SSD_GB' in input_data.columns:
+        input_data['SSD_GB'] = ssd
+
+    # var dummy 1- categoria
+    col_brand = f'Company_{brand}'
+    col_tip = f'TypeName_{tip}'
+    col_cpu = f'Cpu_Category_{cpu_brand}'
+    col_gpu = f'Gpu_Brand_{gpu_brand}'
+
+    for col in [col_brand, col_tip, col_cpu, col_gpu]:
+        if col in input_data.columns:
+            input_data[col] = 1
+
+    pret_estimat = model.predict(input_data)[0]
+    return max(0, pret_estimat)  # Prețul nu poate fi negativ
+
+
+# ex test:
+exemplu_pret = prezice_pret_laptop(
+    'Apple', 'Ultrabook', 16, 512, 'Intel_i7', 'Intel')
+print(f"\n--- TEST PREDICȚIE ---")
+print(
+    f"Preț estimat pentru Apple Ultrabook (16GB RAM, 512GB SSD): {exemplu_pret:.2f} Euro")
+
+# =========================================================
+# HISTOGRAME ȘI DISTRIBUȚII
+# =========================================================
+
+# 1. Distributia generala a preturilor (Histogramă + KDE)
+plt.figure(figsize=(10, 6))
+sns.histplot(data['Price_euros'], kde=True, color='teal')
+plt.title('Distribuția Prețurilor Laptopurilor (Histogramă)')
+plt.xlabel('Preț (Euro)')
+plt.ylabel('Frecvență / Număr Laptopuri')
+plt.show()
+
+# 2. Variatia prețului in funcțte de Categoria CPU (Boxplot)
+plt.figure(figsize=(12, 6))
+sns.boxplot(x='Cpu_Category', y='Price_euros', data=data, palette='coolwarm')
+plt.title('Variația Prețului în funcție de Performanța Procesorului')
+plt.xlabel('Categorie Procesor')
+plt.ylabel('Preț (Euro)')
+plt.show()
+
+# 3. relatia dintre dimensiunea ecranului si pret (Scatter + Regresie)
+plt.figure(figsize=(10, 6))
+sns.regplot(x='Inches', y='Price_euros', data=data,
+            scatter_kws={'alpha': 0.3, 'color': 'teal'},
+            line_kws={'color': 'red'})
+plt.title('Influența Dimensiunii Ecranului (Inches) asupra Prețului')
+plt.xlabel('Dimensiune Ecran (Inches)')
+plt.ylabel('Preț (Euro)')
+plt.show()
+
+# 4. Popularitatea Sistemelor de Operare (Bar Chart)
+plt.figure(figsize=(10, 6))
+order = data['OpSys'].value_counts().index
+sns.countplot(y='OpSys', data=data, order=order, palette='viridis')
+plt.title('Numărul de Laptopuri pe Sistem de Operare')
+plt.xlabel('Număr Laptopuri')
+plt.ylabel('Sistem Operare')
+plt.show()
+
+# statistici rapide pentru interpretare
+print("\n--- STATISTICI PENTRU INTERPRETARE ---")
+print(
+    f"Media de preț pe categorii CPU:\n{data.groupby('Cpu_Category')['Price_euros'].mean().sort_values(ascending=False)}")
+
+# =========================================================
+#  GRAFIC 3D INTERACTIV (PLOTLY)
+# =========================================================
+
+# Importăm biblioteca necesară
+
+# Setăm să se deschidă în browser
+pio.renderers.default = 'browser'
+
+# 1. Creăm graficul 3D
+# Axa X: RAM (Memoria)
+# Axa Y: SSD (Stocarea rapidă)
+# Axa Z: Prețul (Ce ne interesează)
+# Culoare: Compania (Să vedem cine e mai scump la aceleași specificații)
+
+fig = px.scatter_3d(
+    data,
+    x='Ram',
+    y='SSD_GB',  # --- aici putem scgimba cu HDD_GB , Flash_GB, Hybrid_GB
+    z='Price_euros',
+    color='Company',
+
+    # Informații extra când pui mouse-ul pe punct
+    hover_data=['Product', 'TypeName', 'CpuModel'],
+
+    # Titlu
+    title='Relația 3D: RAM vs SSD vs Preț (Colorat după Brand)',
+    opacity=0.7
+)
+fig.update_traces(marker=dict(size=4))
+# Afișăm graficul (Va deschide o pagină web nouă)
+fig.show()
